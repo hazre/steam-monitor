@@ -8,5 +8,10 @@
     "channel": "beta",
     "steamclient64.dll": "78b1f41e23887767cd791bff63257d83f2a81599c5f0dabac1f36e1ed5a767e2",
     "SteamUI.dll": "5a3afd9b15f0a2f4dbad332a28e6fc59db02efc85b1e0b33b246482e38e7428e"
+  },
+  "1789606022": {
+    "channel": "beta",
+    "steamclient64.dll": "a984dd3f1e6e863686489b957a88d707520aeb386a04534cce669de7054f1295",
+    "SteamUI.dll": "cbece19e1beda74f05974d917ea5f90ffc2cdd52c8730967f64de160aa172b73"
   }
 }
