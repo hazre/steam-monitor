@@ -163,6 +163,59 @@ def check_wrapper(img, func_rva, funchash: str, pdata) -> bool:
     return bytes.fromhex(funchash)[::-1] in bytes(img.buf[o:o + HASH_WINDOW])
 
 
+def extract_wire_constants(img, func_rva, allow_different_slot=False):
+    """Derive two 4-byte IPC constants from validated append-helper calls.
+
+    Accept exactly two immediate writes through the same append-helper
+    target. Require a shared stack slot except for methods that explicitly
+    permit different parameter slots. Ambiguous layouts fail closed.
+    """
+    o = img.rva2off(func_rva)
+    if o is None:
+        return None
+    code = bytes(img.buf[o:o + 0x180])
+    hits = []
+    for i in range(len(code) - 40):
+        if code[i:i + 6] != b"\x41\xb8\x04\x00\x00\x00":
+            continue
+        j = i + 6
+        if code[j:j + 2] == b"\xc7\x45":
+            slot = code[j + 2:j + 3]
+            imm_off = j + 3
+            lea = b"\x48\x8d\x55" + slot
+        elif code[j:j + 3] == b"\xc7\x84\x24":
+            slot = code[j + 3:j + 7]
+            imm_off = j + 7
+            lea = b"\x48\x8d\x94\x24" + slot
+        elif code[j:j + 3] == b"\xc7\x44\x24":
+            slot = code[j + 3:j + 4]
+            imm_off = j + 4
+            lea = b"\x48\x8d\x54\x24" + slot
+        else:
+            continue
+        val = struct.unpack_from("<I", code, imm_off)[0]
+        end = imm_off + 4
+        if code[end:end + len(lea)] != lea:
+            continue
+        k = end + len(lea)
+        if code[k:k + 3] == b"\x48\x8d\x4d":
+            call = k + 4
+        elif code[k:k + 4] == b"\x48\x8d\x4c\x24":
+            call = k + 5
+        else:
+            continue
+        if call + 5 > len(code) or code[call] != 0xE8:
+            continue
+        target = func_rva + call + 5 + struct.unpack_from(
+            "<i", code, call + 1)[0]
+        hits.append((val, slot, target))
+    if (len(hits) != 2 or hits[0][2] != hits[1][2]
+            or (not allow_different_slot and hits[0][1] != hits[1][1])
+            or hits[0][0] == hits[1][0]):
+        return None
+    return tuple(f"{item[0]:08X}" for item in hits)
+
+
 def resolve_iface(spec, img, spans, base, pdata):
     td = find_td(img, spans, spec["td"])
     if td is None:
@@ -171,13 +224,23 @@ def resolve_iface(spec, img, spans, base, pdata):
     if err is not None:
         return None, None, err
     methods = {}
-    for name, idx, funchash, _fence, _argc in spec["methods"]:
+    for n, (name, idx, funchash, fence, argc) in enumerate(spec["methods"]):
         f = _u64(img, vt + idx * 8)
         if f is None:
             return None, None, f"slot {idx} unreadable"
         f -= base
         if not check_wrapper(img, f, funchash, pdata):
-            return None, None, f"{name}: wrapper {f:#x} fails hash check"
+            # Re-derive only known wire-method layouts. Keep the existing
+            # vtable/pdata assertions, unique constant pair and helper check.
+            if name not in {"GetAppOwnershipTicketExtendedData",
+                            "RequestEncryptedAppTicket", "GetEncryptedAppTicket",
+                            "GetAppID", "GetAPICallResult"}:
+                return None, None, f"{name}: wrapper {f:#x} fails hash check"
+            pair = extract_wire_constants(
+                img, f, allow_different_slot=(name == "GetAPICallResult"))
+            if pair is None or not check_wrapper(img, f, pair[0], pdata):
+                return None, None, f"{name}: wrapper {f:#x} fails hash check"
+            spec["methods"][n] = (name, idx, pair[0], pair[1], argc)
         methods[name] = f
     return vt, methods, None
 
@@ -209,7 +272,9 @@ def cmd_resolve(args):
     entries = sorted(img.pdata_entries())
     pdata = set(entries)
     resolved, failed = [], []
-    for iface, spec in IPC_IFACES.items():
+    for iface, original_spec in IPC_IFACES.items():
+        # Keep build-specific wire constants local to this resolution run.
+        spec = {**original_spec, "methods": list(original_spec["methods"])}
         vt, methods, err = resolve_iface(spec, img, spans, base, pdata)
         if err is not None:
             failed.append((iface, err))

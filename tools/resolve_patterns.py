@@ -317,6 +317,12 @@ def p2_findcreate(ctx, rb, cm):
     leaves = [t for t in ctx.entries
               if base <= t < base + 0x10000 and not rbf.get(t)
               and not ctx.callees(t) and len(cm.get(t, ())) >= 100]
+    if not leaves:
+        # Hotfix builds can move the leaf just before ReadAsBinary's
+        # 64 KiB window. Keep the same unique maximum and caller threshold.
+        leaves = [t for t in ctx.entries
+                  if base - 0x10000 <= t < base and not rbf.get(t)
+                  and not ctx.callees(t) and len(cm.get(t, ())) >= 100]
     return _max_unique([(t, len(cm.get(t, ()))) for t in leaves],
                        "FindOrCreate cands")
 
@@ -407,6 +413,12 @@ def fnv1a(s: str) -> int:
     return h
 
 
+def canonical_source_path(s: str) -> str:
+    """Map the known hotfix buildworker root to the normal source root."""
+    hotfix = CS.replace("steam_rel_client_win64", "steam_rel_client_hotfix_win64")
+    return CS + s[len(hotfix):] if s.startswith(hotfix) else s
+
+
 class Ctx:
     def __init__(self, dll: Path):
         self.img = mp.Image(dll)
@@ -423,7 +435,11 @@ class Ctx:
                     while j < len(blob) and 32 <= blob[j] < 127:
                         j += 1
                     if j - i >= 5 and (j >= len(blob) or blob[j] == 0):
-                        self.strings[va + i] = blob[i:j].decode()
+                        # Steam hotfix builds retain source paths but rename the
+                        # buildworker root. Canonicalize that known root only;
+                        # candidate uniqueness and byte checks remain mandatory.
+                        self.strings[va + i] = canonical_source_path(
+                            blob[i:j].decode())
                     i = max(j, i + 1)
                 else:
                     i += 1
